@@ -1,0 +1,1104 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Object Spiders V2</title>
+<style>
+html,body{
+  margin:0;
+  overflow:hidden;
+  background:#111;
+  color:#fff;
+  font:14px monospace;
+}
+canvas{display:block}
+#ui{
+  position:fixed;
+  z-index:3;
+  left:10px;
+  top:10px;
+  background:#000c;
+  padding:10px;
+  border:1px solid #777;
+  line-height:1.5;
+}
+.modal{
+  position:fixed;
+  z-index:5;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  background:#151515;
+  border:2px solid #aaa;
+  padding:22px;
+  text-align:center;
+  display:none;
+}
+.modal button{
+  font:20px monospace;
+  margin:6px;
+  padding:10px 18px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+WASD move • Mouse aim • Click shoot • E hide/interact<br>
+Ammo: <b id="a">18</b> |
+HP: <b id="h">100</b> |
+<span id="s">Explore</span>
+</div>
+
+<div id="puzzle" class="modal">
+  <div id="pt">AMMO LOCKER</div>
+  <p>Solve while the game keeps running!</p>
+  <div id="choices"></div>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+const C = document.getElementById("c");
+const X = C.getContext("2d");
+
+function rs(){
+  C.width = innerWidth;
+  C.height = innerHeight;
+}
+
+addEventListener("resize",rs);
+rs();
+
+const K = {};
+const M = {
+  x:0,
+  y:0,
+  down:false
+};
+
+addEventListener("keydown",e=>{
+  K[e.key.toLowerCase()] = true;
+
+  if(e.key.toLowerCase() === "e"){
+    act();
+  }
+});
+
+addEventListener("keyup",e=>{
+  K[e.key.toLowerCase()] = false;
+});
+
+addEventListener("mousemove",e=>{
+  M.x = e.clientX;
+  M.y = e.clientY;
+});
+
+addEventListener("mousedown",()=>{
+  M.down = true;
+});
+
+addEventListener("mouseup",()=>{
+  M.down = false;
+});
+
+
+/* =========================
+   WORLD
+========================= */
+
+const W = 2000;
+const H = 1400;
+
+const walls = [
+  {x:0,y:0,w:2000,h:30},
+  {x:0,y:1370,w:2000,h:30},
+  {x:0,y:0,w:30,h:1400},
+  {x:1970,y:0,w:30,h:1400},
+
+  {x:500,y:30,w:30,h:360},
+  {x:500,y:560,w:30,h:300},
+  {x:500,y:1030,w:30,h:340},
+
+  {x:1000,y:30,w:30,h:300},
+  {x:1000,y:470,w:30,h:390},
+  {x:1000,y:1040,w:30,h:330},
+
+  {x:1500,y:30,w:30,h:420},
+  {x:1500,y:570,w:30,h:800}
+];
+
+const buildings = [
+  {x:90,y:110,w:330,h:300,n:"HOUSE"},
+  {x:590,y:170,w:320,h:280,n:"STORE"},
+  {x:1090,y:100,w:330,h:300,n:"BARN"},
+  {x:1580,y:180,w:300,h:300,n:"HOUSE"},
+  {x:1080,y:900,w:350,h:330,n:"GARAGE"}
+];
+
+/* Only these areas can be used for hiding. */
+
+const hides = buildings.map(b=>({
+  x:b.x+35,
+  y:b.y+35,
+  w:b.w-70,
+  h:b.h-70
+}));
+
+const ammoBoxes = [
+  {x:260,y:270,open:false},
+  {x:730,y:310,open:false},
+  {x:1240,y:1060,open:false}
+];
+
+
+/* =========================
+   PLAYER
+========================= */
+
+let P = {
+  x:260,
+  y:650,
+  r:13,
+  hp:100,
+  ammo:18,
+  hidden:false
+};
+
+
+/* =========================
+   SPIDERS
+========================= */
+
+let sp = [];
+
+function add(x,y,size,type,shell){
+
+  sp.push({
+    x:x,
+    y:y,
+
+    size:size,
+    type:type,
+    shell:shell,
+
+    r:
+      size === "small" ? 20 :
+      size === "medium" ? 31 :
+      48,
+
+    legs:
+      size === "small" ? 6 :
+      size === "medium" ? 8 :
+      10,
+
+    hp:
+      size === "small" ? 1 :
+      size === "medium" ? 4 :
+      10,
+
+    broken:[],
+    seen:false,
+    scream:0,
+    phase:Math.random()*7,
+
+    speed:
+      size === "small" ? 1.15 :
+      size === "medium" ? 0.8 :
+      0.55
+  });
+}
+
+
+/* Small spiders in houses */
+
+add(230,230,"small","normal","chair");
+add(320,300,"small","head","box");
+
+
+/* Medium spiders around streets */
+
+add(760,280,"medium","leg","barrel");
+add(1280,600,"medium","armored","cabinet");
+
+
+/* Big spiders */
+
+add(1680,650,"big","leg","bus");
+add(1770,1150,"big","head","horse");
+
+
+/* =========================
+   GAME STATE
+========================= */
+
+let bullets = [];
+let cooldown = 0;
+let gameOver = false;
+let puzzle = null;
+
+
+/* =========================
+   COLLISION
+========================= */
+
+function blocked(x,y,r){
+
+  return walls.some(q =>
+    x+r > q.x &&
+    x-r < q.x+q.w &&
+    y+r > q.y &&
+    y-r < q.y+q.h
+  );
+}
+
+
+function inHide(){
+
+  return hides.some(q =>
+    P.x > q.x &&
+    P.x < q.x+q.w &&
+    P.y > q.y &&
+    P.y < q.y+q.h
+  );
+}
+
+
+/* =========================
+   INTERACTION / HIDING
+========================= */
+
+function act(){
+
+  if(gameOver) return;
+
+  if(puzzle){
+    return;
+  }
+
+  if(P.hidden){
+
+    P.hidden = false;
+    document.getElementById("s").textContent = "Explore";
+
+    return;
+  }
+
+  if(inHide()){
+
+    P.hidden = true;
+    document.getElementById("s").textContent = "HIDDEN";
+
+    return;
+  }
+
+
+  /* Search for an ammo puzzle */
+
+  for(const q of ammoBoxes){
+
+    if(
+      !q.open &&
+      Math.hypot(P.x-q.x,P.y-q.y) < 55
+    ){
+
+      puzzle = q;
+      openPuzzle();
+      return;
+    }
+  }
+}
+
+
+/* =========================
+   PUZZLES
+========================= */
+
+function openPuzzle(){
+
+  document.getElementById("puzzle").style.display = "block";
+
+  document.getElementById("pt").textContent =
+    "AMMO LOCKER";
+
+  const choices =
+    document.getElementById("choices");
+
+  choices.innerHTML = "";
+
+  const good = Math.floor(Math.random()*3);
+
+  for(let i=0;i<3;i++){
+
+    const b = document.createElement("button");
+
+    b.textContent = ["▲","●","■"][i];
+
+    b.onclick = ()=>{
+
+      if(i === good){
+
+        puzzle.open = true;
+
+        P.ammo += 12;
+
+        document.getElementById("puzzle").style.display =
+          "none";
+
+        puzzle = null;
+
+      }else{
+
+        P.hp -= 8;
+
+        document.getElementById("pt").textContent =
+          "WRONG — TRY AGAIN";
+      }
+    };
+
+    choices.appendChild(b);
+  }
+}
+
+
+/* =========================
+   SHOOTING
+========================= */
+
+function shoot(){
+
+  if(
+    P.ammo <= 0 ||
+    P.hidden ||
+    cooldown > 0 ||
+    gameOver
+  ){
+    return;
+  }
+
+  P.ammo--;
+
+  cooldown = 0.17;
+
+
+  /* Aim direction */
+
+  let dx = M.x - C.width/2;
+  let dy = M.y - C.height/2;
+
+  let L = Math.hypot(dx,dy) || 1;
+
+  let ux = dx/L;
+  let uy = dy/L;
+
+
+  /* PLAYER RECOIL */
+
+  P.x -= ux * 7;
+  P.y -= uy * 7;
+
+
+  bullets.push({
+    x:P.x,
+    y:P.y,
+    vx:ux*12,
+    vy:uy*12
+  });
+}
+
+
+function dist(a,b){
+  return Math.hypot(
+    a.x-b.x,
+    a.y-b.y
+  );
+}
+
+
+/* =========================
+   GAME UPDATE
+========================= */
+
+function update(dt){
+
+  if(gameOver) return;
+
+
+  if(M.down){
+    shoot();
+  }
+
+  cooldown -= dt;
+
+
+  /* Movement */
+
+  let dx =
+    (K.d ? 1 : 0) -
+    (K.a ? 1 : 0);
+
+  let dy =
+    (K.s ? 1 : 0) -
+    (K.w ? 1 : 0);
+
+
+  if(dx || dy){
+
+    const L = Math.hypot(dx,dy);
+
+    dx /= L;
+    dy /= L;
+
+    const nx = P.x + dx*3;
+    const ny = P.y + dy*3;
+
+    if(!blocked(nx,P.y,P.r)){
+      P.x = nx;
+    }
+
+    if(!blocked(P.x,ny,P.r)){
+      P.y = ny;
+    }
+  }
+
+
+  /* Bullets */
+
+  for(const b of bullets){
+
+    b.x += b.vx;
+    b.y += b.vy;
+
+
+    for(const z of sp){
+
+      if(z.dead) continue;
+
+      const d = dist(b,z);
+
+      if(d < z.r+6){
+
+        let hitLeg = false;
+
+
+        /* Check individual legs */
+
+        for(let i=0;i<z.legs;i++){
+
+          const a =
+            i/z.legs*Math.PI*2 +
+            Math.sin(
+              performance.now()/250 +
+              z.phase
+            )*.18;
+
+          const len = z.r+22;
+
+          const px =
+            z.x +
+            Math.cos(a)*len;
+
+          const py =
+            z.y +
+            Math.sin(a)*len;
+
+
+          if(Math.hypot(b.x-px,b.y-py) < 12){
+
+            hitLeg = true;
+
+            if(!z.broken.includes(i)){
+              z.broken.push(i);
+            }
+
+            break;
+          }
+        }
+
+
+        /* Leg-only creature */
+
+        if(z.type === "leg"){
+
+          if(hitLeg){
+            z.hp--;
+          }else{
+            continue;
+          }
+        }
+
+
+        /* Armored creature */
+
+        else if(z.type === "armored"){
+
+          if(hitLeg){
+            z.hp--;
+          }else{
+            continue;
+          }
+        }
+
+
+        /* Head creature */
+
+        else if(z.type === "head"){
+
+          const headY =
+            z.y-z.r*.75;
+
+          if(
+            Math.hypot(
+              b.x-z.x,
+              b.y-headY
+            ) < 15
+          ){
+
+            z.hp = 0;
+
+          }else{
+
+            continue;
+          }
+        }
+
+
+        /* Normal creature */
+
+        else{
+
+          z.hp--;
+        }
+
+
+        b.dead = true;
+
+
+        if(
+          z.hp <= 0 ||
+          z.broken.length >= z.legs
+        ){
+
+          z.dead = true;
+        }
+      }
+    }
+  }
+
+
+  bullets = bullets.filter(b =>
+    !b.dead &&
+    b.x>0 &&
+    b.y>0 &&
+    b.x<W &&
+    b.y<H
+  );
+
+
+  /* =========================
+     SPIDER AI
+  ========================= */
+
+  for(const z of sp){
+
+    if(z.dead) continue;
+
+    const d = dist(P,z);
+
+
+    /* Detect player */
+
+    if(
+      !P.hidden &&
+      d < 210 &&
+      !z.seen
+    ){
+
+      z.seen = true;
+      z.scream = 60;
+    }
+
+
+    /* Chase */
+
+    if(
+      z.seen &&
+      !P.hidden &&
+      d > 38
+    ){
+
+      z.x +=
+        (P.x-z.x)/d*z.speed;
+
+      z.y +=
+        (P.y-z.y)/d*z.speed;
+    }
+
+
+    /* Damage */
+
+    if(
+      z.seen &&
+      !P.hidden &&
+      d < 38
+    ){
+
+      P.hp -= .45;
+    }
+
+    if(z.scream > 0){
+      z.scream -= 1;
+    }
+  }
+
+
+  document.getElementById("a").textContent =
+    P.ammo;
+
+  document.getElementById("h").textContent =
+    Math.max(0,Math.floor(P.hp));
+
+
+  if(P.hp <= 0){
+    gameOver = true;
+  }
+}
+
+
+/* =========================
+   SPIDER DRAWING
+========================= */
+
+function drawSpider(z){
+
+  /*
+    Every leg is drawn separately
+    and moves independently.
+  */
+
+  for(let i=0;i<z.legs;i++){
+
+    const a =
+      i/z.legs*Math.PI*2 +
+      Math.sin(
+        performance.now()/280 +
+        z.phase
+      )*.16;
+
+    const len = z.r+28;
+
+    X.strokeStyle =
+      z.broken.includes(i)
+      ? "#292929"
+      : "#111";
+
+    X.lineWidth = 6;
+
+    X.beginPath();
+
+    X.moveTo(z.x,z.y);
+
+    X.lineTo(
+      z.x+Math.cos(a)*len,
+      z.y+Math.sin(a)*len
+    );
+
+    X.stroke();
+  }
+
+
+  /* Spider body */
+
+  X.fillStyle =
+    z.size === "small"
+    ? "#79624e"
+    : z.size === "medium"
+    ? "#635145"
+    : "#493d36";
+
+  X.beginPath();
+
+  X.arc(
+    z.x,
+    z.y,
+    z.r,
+    0,
+    7
+  );
+
+  X.fill();
+
+
+  /* Shell */
+
+  X.fillStyle =
+    z.shell === "box"
+    ? "#927b5b"
+    : z.shell === "barrel"
+    ? "#67462f"
+    : z.shell === "cabinet"
+    ? "#54463e"
+    : z.shell === "bus"
+    ? "#3f4544"
+    : "#6d5a45";
+
+  X.fillRect(
+    z.x-z.r*.7,
+    z.y-z.r*.7,
+    z.r*1.4,
+    z.r*1.4
+  );
+
+
+  /* Head sticking out */
+
+  if(z.type === "head"){
+
+    X.fillStyle = "#4f6944";
+
+    X.beginPath();
+
+    X.arc(
+      z.x,
+      z.y-z.r*.8,
+      z.r*.43,
+      0,
+      7
+    );
+
+    X.fill();
+
+
+    X.fillStyle = "#111";
+
+    X.beginPath();
+
+    X.arc(
+      z.x-5,
+      z.y-z.r*.9,
+      3,
+      0,
+      7
+    );
+
+    X.arc(
+      z.x+5,
+      z.y-z.r*.9,
+      3,
+      0,
+      7
+    );
+
+    X.fill();
+  }
+}
+
+
+/* =========================
+   DRAW WORLD
+========================= */
+
+function draw(){
+
+  X.clearRect(
+    0,
+    0,
+    C.width,
+    C.height
+  );
+
+
+  const ox =
+    C.width/2-P.x;
+
+  const oy =
+    C.height/2-P.y;
+
+
+  X.save();
+
+  X.translate(ox,oy);
+
+
+  /* Ground */
+
+  X.fillStyle = "#344034";
+
+  X.fillRect(
+    0,
+    0,
+    W,
+    H
+  );
+
+
+  /* Roads */
+
+  X.fillStyle = "#4a4943";
+
+  X.fillRect(
+    30,
+    540,
+    1940,
+    180
+  );
+
+  X.fillRect(
+    920,
+    30,
+    180,
+    1340
+  );
+
+
+  /* Buildings */
+
+  for(const b of buildings){
+
+    X.fillStyle = "#70675b";
+
+    X.fillRect(
+      b.x,
+      b.y,
+      b.w,
+      b.h
+    );
+
+
+    X.strokeStyle = "#171717";
+
+    X.strokeRect(
+      b.x,
+      b.y,
+      b.w,
+      b.h
+    );
+
+
+    /* Door */
+
+    X.fillStyle = "#222";
+
+    X.fillRect(
+      b.x+b.w/2-25,
+      b.y+b.h-10,
+      50,
+      10
+    );
+  }
+
+
+  /* Walls */
+
+  for(const q of walls){
+
+    X.fillStyle = "#182018";
+
+    X.fillRect(
+      q.x,
+      q.y,
+      q.w,
+      q.h
+    );
+  }
+
+
+  /* Hiding zones */
+
+  for(const q of hides){
+
+    X.strokeStyle = "#888";
+
+    X.setLineDash([6,6]);
+
+    X.strokeRect(
+      q.x,
+      q.y,
+      q.w,
+      q.h
+    );
+
+    X.setLineDash([]);
+  }
+
+
+  /* Ammo puzzle boxes */
+
+  for(const q of ammoBoxes){
+
+    if(!q.open){
+
+      X.fillStyle = "#d1ad55";
+
+      X.fillRect(
+        q.x-12,
+        q.y-12,
+        24,
+        24
+      );
+
+      X.fillStyle = "#111";
+
+      X.fillText(
+        "?",
+        q.x-4,
+        q.y+5
+      );
+    }
+  }
+
+
+  /* Bullets */
+
+  for(const b of bullets){
+
+    X.fillStyle = "#fff";
+
+    X.beginPath();
+
+    X.arc(
+      b.x,
+      b.y,
+      3,
+      0,
+      7
+    );
+
+    X.fill();
+  }
+
+
+  /* Spiders */
+
+  for(const z of sp){
+
+    if(!z.dead){
+      drawSpider(z);
+    }
+  }
+
+
+  /* Player */
+
+  if(!P.hidden){
+
+    X.fillStyle = "#ddd";
+
+    X.beginPath();
+
+    X.arc(
+      P.x,
+      P.y,
+      P.r,
+      0,
+      7
+    );
+
+    X.fill();
+
+  }else{
+
+    X.fillStyle = "#aaa";
+
+    X.globalAlpha = .25;
+
+    X.beginPath();
+
+    X.arc(
+      P.x,
+      P.y,
+      22,
+      0,
+      7
+    );
+
+    X.fill();
+
+    X.globalAlpha = 1;
+  }
+
+
+  X.restore();
+
+
+  /* Screaming */
+
+  const screaming =
+    sp.some(z =>
+      z.scream > 0 &&
+      !z.dead
+    );
+
+
+  if(screaming && !P.hidden){
+
+    X.fillStyle = "#e33";
+
+    X.font = "bold 28px monospace";
+
+    X.textAlign = "center";
+
+    X.fillText(
+      "SCREEEEEECH!",
+      C.width/2,
+      65
+    );
+  }
+
+
+  /* Game over */
+
+  if(gameOver){
+
+    X.fillStyle = "#000d";
+
+    X.fillRect(
+      0,
+      0,
+      C.width,
+      C.height
+    );
+
+    X.fillStyle = "#fff";
+
+    X.font = "bold 46px monospace";
+
+    X.textAlign = "center";
+
+    X.fillText(
+      "CAUGHT",
+      C.width/2,
+      C.height/2
+    );
+  }
+}
+
+
+/* =========================
+   GAME LOOP
+========================= */
+
+let last = 0;
+
+function loop(t){
+
+  const dt =
+    Math.min(
+      .033,
+      (t-last)/1000 || 0
+    );
+
+  last = t;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
